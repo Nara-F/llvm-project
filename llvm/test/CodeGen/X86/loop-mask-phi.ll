@@ -2,19 +2,15 @@
 ; RUN: llc -mtriple=x86_64 -mattr=+avx2,+avx512f,+avx512vl -O3 -verify-machineinstrs < %s | FileCheck %s --check-prefix=VL
 ; RUN: llc -mtriple=x86_64 -mattr=+avx2 -O3 -stop-after=codegenprepare < %s | FileCheck %s --check-prefix=CGP
 
-; TODO: Keep the comparison mask wide across the loop PHI on AVX2.
-
 define <8 x float> @advance(<8 x float> %start, <8 x float> %step, <8 x float> %limit) {
 ; AVX2-LABEL: advance:
 ; AVX2:       [[LOOP:\.LBB[0-9]+_[0-9]+]]:
-; AVX2:       vpmovzxwd
-; AVX2:       vpslld
-; AVX2:       vblendvps
-; AVX2:       vcmpltps
-; AVX2:       vextractf128
-; AVX2:       vpackssdw
-; AVX2:       vtestps
-; AVX2:       jne [[LOOP]]
+; AVX2-NOT:   {{^[ \t]+[a-z]}}
+; AVX2:       vaddps
+; AVX2-NEXT:  vblendvps [[MASK:%ymm[0-9]+]],
+; AVX2-NEXT:  vcmpltps {{.*}}, [[MASK]]
+; AVX2-NEXT:  vtestps [[MASK]], [[MASK]]
+; AVX2-NEXT:  jne [[LOOP]]
 ;
 ; VL-LABEL: advance:
 ; VL:       [[LOOP:\.LBB[0-9]+_[0-9]+]]:
@@ -23,7 +19,7 @@ define <8 x float> @advance(<8 x float> %start, <8 x float> %step, <8 x float> %
 ; VL:       jne [[LOOP]]
 ;
 ; CGP-LABEL: define <8 x float> @advance(
-; CGP:       %active = phi <8 x i1>
+; CGP:       %active.wide = phi <8 x i32>
 entry:
   %initial = fcmp olt <8 x float> %start, %limit
   br label %loop
@@ -44,7 +40,7 @@ exit:
 
 define <8 x float> @advance_guarded(<8 x float> %start, <8 x float> %step, <8 x float> %limit) {
 ; CGP-LABEL: define <8 x float> @advance_guarded(
-; CGP:       %active = phi <8 x i1>
+; CGP:       %active.wide = phi <8 x i32>
 entry:
   %initial = fcmp olt <8 x float> %start, %limit
   %initial.bits = bitcast <8 x i1> %initial to i8

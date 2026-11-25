@@ -329,6 +329,8 @@ namespace llvm {
     EVT getSetCCResultType(const DataLayout &DL, LLVMContext &Context,
                            EVT VT) const override;
 
+    bool shouldWidenLoopMaskPhi(EVT SelectVT) const override;
+
     bool targetShrinkDemandedConstant(SDValue Op, const APInt &DemandedBits,
                                       const APInt &DemandedElts,
                                       TargetLoweringOpt &TLO) const override;

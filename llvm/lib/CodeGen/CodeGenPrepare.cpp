@@ -8809,6 +8809,81 @@ static bool strengthReduceVectorPhiUsers(PHINode *Phi, LoopInfo *LI) {
   return true;
 }
 
+static bool isLocalMaskZeroTest(const User *MaskUser, const BasicBlock *BB) {
+  auto *Bits = dyn_cast<BitCastInst>(MaskUser);
+  if (!Bits || !Bits->getType()->isIntegerTy() || Bits->getParent() != BB ||
+      !Bits->hasOneUse())
+    return false;
+
+  auto *ZeroTest = dyn_cast<ICmpInst>(*Bits->user_begin());
+  return ZeroTest && ZeroTest->getParent() == BB && ZeroTest->isEquality() &&
+         match(ZeroTest->getOperand(0) == Bits ? ZeroTest->getOperand(1)
+                                               : ZeroTest->getOperand(0),
+               m_Zero());
+}
+
+static bool widenLoopMaskPhi(PHINode *Phi, const DataLayout &DL,
+                             const TargetLowering &TLI, LoopInfo &LI) {
+  auto *MaskTy = dyn_cast<FixedVectorType>(Phi->getType());
+  if (!MaskTy || !MaskTy->getElementType()->isIntegerTy(1) ||
+      !Phi->hasOneUse() || Phi->getNumIncomingValues() != 2)
+    return false;
+
+  auto *Select = dyn_cast<SelectInst>(*Phi->user_begin());
+  BasicBlock *Header = Phi->getParent();
+  if (!Select || Select->getCondition() != Phi || Select->getParent() != Header)
+    return false;
+
+  auto *SelectTy = cast<FixedVectorType>(Select->getType());
+  if (!TLI.shouldWidenLoopMaskPhi(TLI.getValueType(DL, SelectTy)))
+    return false;
+
+  Loop *L = LI.getLoopFor(Header);
+  if (!L || !L->isInnermost() || L->getHeader() != Header || !L->getLoopLatch())
+    return false;
+  BasicBlock *LoopPred = L->getLoopPredecessor();
+  if (!LoopPred)
+    return false;
+
+  for (unsigned Index = 0; Index != Phi->getNumIncomingValues(); ++Index) {
+    BasicBlock *Pred = Phi->getIncomingBlock(Index);
+    auto *Cmp = dyn_cast<CmpInst>(Phi->getIncomingValue(Index));
+    if (!Cmp || Cmp->getOperand(0)->getType() != SelectTy)
+      return false;
+
+    BasicBlock *CmpBB = Cmp->getParent();
+    if (CmpBB != Pred &&
+        (Pred != LoopPred || !isa<UncondBrInst>(Pred->getTerminator()) ||
+         &Pred->front() != Pred->getTerminator() ||
+         Pred->getSinglePredecessor() != CmpBB))
+      return false;
+    if (any_of(Cmp->users(), [&](const User *MaskUser) {
+          return MaskUser != Phi && !isLocalMaskZeroTest(MaskUser, CmpBB);
+        }))
+      return false;
+  }
+
+  auto *WideTy = FixedVectorType::getInteger(SelectTy);
+  auto *WidePhi = PHINode::Create(WideTy, Phi->getNumIncomingValues(),
+                                  Phi->getName() + ".wide", Phi->getIterator());
+  WidePhi->setDebugLoc(Phi->getDebugLoc());
+  for (unsigned Index = 0; Index != Phi->getNumIncomingValues(); ++Index) {
+    BasicBlock *Pred = Phi->getIncomingBlock(Index);
+    auto *Cmp = cast<CmpInst>(Phi->getIncomingValue(Index));
+    IRBuilder<> Builder(Cmp->getParent()->getTerminator());
+    Builder.SetCurrentDebugLocation(Cmp->getDebugLoc());
+    WidePhi->addIncoming(Builder.CreateSExt(Cmp, WideTy), Pred);
+  }
+
+  IRBuilder<> Builder(Header->getFirstInsertionPt());
+  Builder.SetCurrentDebugLocation(Phi->getDebugLoc());
+  auto *Cond = Builder.CreateICmpSLT(WidePhi, Constant::getNullValue(WideTy));
+  Cond->takeName(Phi);
+  Phi->replaceAllUsesWith(Cond);
+  Phi->eraseFromParent();
+  return true;
+}
+
 bool CodeGenPrepare::optimizeInst(Instruction *I, ModifyDT &ModifiedDT) {
   bool AnyChange = false;
   AnyChange = fixupDbgVariableRecordsOnInst(*I);
@@ -8830,6 +8905,9 @@ bool CodeGenPrepare::optimizeInst(Instruction *I, ModifyDT &ModifiedDT) {
       ++NumPHIsElim;
       return true;
     }
+
+    if (widenLoopMaskPhi(P, *DL, *TLI, *LI))
+      return true;
 
     // Look for simple GEPs on scalable vectors used as data which may
     // introduce unnecessary multiplies in the loop.

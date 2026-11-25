@@ -3618,6 +3618,11 @@ bool X86TargetLowering::convertSelectOfConstantsToMath(EVT VT) const {
   return true;
 }
 
+bool X86TargetLowering::shouldWidenLoopMaskPhi(EVT SelectVT) const {
+  return Subtarget.hasAVX2() && !Subtarget.hasAVX512() &&
+         SelectVT == MVT::v8f32;
+}
+
 bool X86TargetLowering::shouldNormalizeToSelectSequence(LLVMContext &, EVT VT,
                                                         EVT) const {
   // With CCMP, keep and/or(setcc, setcc) trees intact so LowerSELECT can

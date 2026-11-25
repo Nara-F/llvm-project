@@ -3414,6 +3414,8 @@ public:
     return false;
   }
 
+  virtual bool shouldWidenLoopMaskPhi(EVT SelectVT) const { return false; }
+
   /// Return true if the target supplies and combines to a paired load
   /// two loaded values of type LoadedType next to each other in memory.
   /// RequiredAlignment gives the minimal alignment constraints that must be met
